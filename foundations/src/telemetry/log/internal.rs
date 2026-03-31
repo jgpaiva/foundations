@@ -1,6 +1,7 @@
 use super::init::LogHarness;
 use crate::telemetry::scope::Scope;
 use slog::{Logger, OwnedKV, SendSyncRefUnwindSafeKV};
+use std::backtrace::Backtrace;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -19,10 +20,14 @@ pub struct LoggerWithKvNestingTracking {
     // zero if you replace the logger with a "root" logger that doesn't have any nested KVs in it.
     // (That said, accuracy is not critical, as this is only used as a safety check)
     pub(crate) nesting_level: u32,
+
+    // One stacktrace captured per nesting increment. Stored as Arc so that cloning this struct
+    // (e.g. in fork_log) is cheap and does not deep-copy backtrace data.
+    pub(crate) nesting_stacktraces: Vec<Arc<Backtrace>>,
 }
 
 impl LoggerWithKvNestingTracking {
-    pub const MAX_NESTING: u32 = 1000;
+    pub const MAX_NESTING: u32 = 200;
     pub const EXCEEDED_MAX_NESTING_ERROR: &'static str = "foundations: maximum logger KV nesting exceeded (are add_fields! or set_verbosity being called in a loop?)";
 
     /// Create a new LoggerWithKvNestingTracking based on a fresh logger. The KV nesting level is
@@ -31,6 +36,7 @@ impl LoggerWithKvNestingTracking {
         Self {
             inner: logger,
             nesting_level: 0,
+            nesting_stacktraces: Vec::new(),
         }
     }
 
@@ -52,6 +58,9 @@ impl LoggerWithKvNestingTracking {
         >,
     > {
         current_log_lock.nesting_level = current_log_lock.nesting_level.saturating_add(1);
+        current_log_lock
+            .nesting_stacktraces
+            .push(Arc::new(Backtrace::capture()));
 
         match current_log_lock.nesting_level {
             0..Self::MAX_NESTING => Some(current_log_lock), // continue with operation
@@ -61,7 +70,14 @@ impl LoggerWithKvNestingTracking {
                     drop(current_log_lock);
                     panic!("{}", Self::EXCEEDED_MAX_NESTING_ERROR);
                 } else {
-                    slog::error!(current_log_lock, "{}", Self::EXCEEDED_MAX_NESTING_ERROR; "backtrace"=> std::backtrace::Backtrace::capture().to_string());
+                    slog::error!(current_log_lock, "{}", Self::EXCEEDED_MAX_NESTING_ERROR);
+                    for (i, bt) in current_log_lock.nesting_stacktraces.iter().enumerate() {
+                        let bt = Arc::clone(bt);
+                        slog::error!(current_log_lock, "logger nesting stacktrace";
+                            "nesting_depth" => i + 1,
+                            "backtrace" => bt.to_string()
+                        );
+                    }
                     None // avoid further nesting
                 }
             }
