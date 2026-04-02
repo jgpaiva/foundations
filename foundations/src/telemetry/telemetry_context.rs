@@ -6,18 +6,18 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 feature_use!(cfg(feature = "logging"), {
-    use super::log::internal::{LogScope, SharedLog, current_log, fork_log};
+    use super::log::internal::{current_log, fork_log, LogScope, SharedLog};
     use std::sync::Arc;
 });
 
 feature_use!(cfg(feature = "tracing"), {
+    use super::tracing::internal::{current_span, fork_trace, SharedSpan};
     use super::tracing::SpanScope;
-    use super::tracing::internal::{SharedSpan, current_span, fork_trace};
     use std::borrow::Cow;
 
     feature_use!(cfg(feature = "testing"), {
         use super::tracing::internal::Tracer;
-        use super::tracing::testing::{TestTracerScope, current_test_tracer};
+        use super::tracing::testing::{current_test_tracer, TestTracerScope};
     });
 });
 
@@ -391,8 +391,9 @@ impl TelemetryContext {
 
 #[cfg(feature = "logging")]
 impl TelemetryContext {
-    /// Creates a telemetry context with log that is detached from the current context's log, but
-    /// inherits its log fields.
+    /// Creates a telemetry context with a log that is detached from the current context's log, but
+    /// inherits its log fields. The forked log is named `"forked"`. To supply a custom name use
+    /// [`with_forked_log_named`][Self::with_forked_log_named].
     ///
     /// For example, can be used in server software to produce separate logs for HTTP requests, each
     /// of which has log fields added during the HTTP connection establishment.
@@ -453,7 +454,21 @@ impl TelemetryContext {
     /// ```
     pub fn with_forked_log(&self) -> Self {
         Self {
-            log: fork_log(),
+            log: fork_log("forked"),
+
+            #[cfg(feature = "tracing")]
+            span: self.span.clone(),
+
+            #[cfg(all(feature = "tracing", feature = "testing"))]
+            test_tracer: self.test_tracer.clone(),
+        }
+    }
+
+    /// Like [`with_forked_log`][Self::with_forked_log], but assigns an explicit name to the
+    /// forked log instead of using the default `"forked"`.
+    pub fn with_forked_log_named(&self, log_name: &str) -> Self {
+        Self {
+            log: fork_log(log_name),
 
             #[cfg(feature = "tracing")]
             span: self.span.clone(),

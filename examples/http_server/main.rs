@@ -83,9 +83,9 @@ async fn main() -> BootstrapResult<()> {
     let mut endpoint_futures = FuturesUnordered::new();
 
     for ((name, settings), listener) in cli.settings.endpoints.into_iter().zip(listeners) {
-        // Each endpoint has it's own independent log.
+        // Each endpoint has its own independent log.
         let endpoint_fut = TelemetryContext::current()
-            .with_forked_log()
+            .with_forked_log_named("request-log")
             .apply(async move { run_endpoint(name, settings.routes, listener).await });
 
         endpoint_futures.push(endpoint_fut)
@@ -149,7 +149,7 @@ async fn run_endpoint(
                 // endoint log.
                 tokio::spawn(
                     TelemetryContext::current()
-                        .with_forked_log()
+                        .with_forked_log_named("connection-log")
                         .apply(async move {
                             serve_connection(endpoint_name, conn, client_addr, routes).await
                         }),
@@ -195,7 +195,7 @@ async fn serve_connection(
             // Each request gets independent log inherited from the connection log and separate
             // trace linked to the connection trace.
             conn_tele_ctx
-                .with_forked_log()
+                .with_forked_log_named("request-log")
                 .with_forked_trace("request")
                 .apply(async move { respond(endpoint_name, req, routes).await })
         }

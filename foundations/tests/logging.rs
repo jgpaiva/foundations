@@ -1,7 +1,8 @@
-use foundations::telemetry::TestTelemetryContext;
 use foundations::telemetry::log::internal::LoggerWithKvNestingTracking;
 use foundations::telemetry::log::{add_fields, set_verbosity, warn};
 use foundations::telemetry::settings::{LogVerbosity, LoggingSettings, RateLimitingSettings};
+use foundations::telemetry::TelemetryContext;
+use foundations::telemetry::TestTelemetryContext;
 use foundations_macros::with_test_telemetry;
 
 #[with_test_telemetry(test)]
@@ -75,14 +76,187 @@ fn test_not_exceed_limit_kv_nesting(_ctx: TestTelemetryContext) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Log forking — name, lineage, and field isolation
+// ---------------------------------------------------------------------------
+
+/// with_forked_log() creates a usable forked context (default name).
+#[with_test_telemetry(test)]
+fn test_fork_log_name(_ctx: TestTelemetryContext) {
+    use foundations::telemetry::log::internal::current_log;
+
+    let fork_ctx = TelemetryContext::current().with_forked_log();
+    let _scope = fork_ctx.scope();
+
+    let log = current_log();
+    // `name` is pub(crate) so we cannot access it directly from an integration
+    // test. We verify the observable behaviour instead: forking does not panic
+    // and the resulting context can be scoped and used.
+    drop(log); // just confirming we can obtain a handle to the forked log
+}
+
+/// Forking a log should inherit the parent's fields.
+#[with_test_telemetry(test)]
+fn test_fork_inherits_parent_fields(mut ctx: TestTelemetryContext) {
+    ctx.set_logging_settings(LoggingSettings::default());
+
+    add_fields!("parent_field" => "parent_value");
+
+    {
+        let _scope = TelemetryContext::current()
+            .with_forked_log_named("child")
+            .scope();
+        warn!("from child");
+    }
+
+    let records = ctx.log_records();
+    let child_record = records
+        .iter()
+        .find(|r| r.message == "from child")
+        .expect("child log record not found");
+
+    assert!(
+        child_record
+            .fields
+            .iter()
+            .any(|(k, v)| k == "parent_field" && v == "parent_value"),
+        "child should inherit parent field; got: {:?}",
+        child_record.fields
+    );
+}
+
+/// Fields added inside a fork must not appear on sibling forks.
+#[with_test_telemetry(test)]
+fn test_fork_fields_isolated_from_sibling(mut ctx: TestTelemetryContext) {
+    ctx.set_logging_settings(LoggingSettings::default());
+
+    {
+        let _scope = TelemetryContext::current()
+            .with_forked_log_named("fork-a")
+            .scope();
+        add_fields!("only_in_a" => "yes");
+        warn!("from fork a");
+    }
+
+    {
+        let _scope = TelemetryContext::current()
+            .with_forked_log_named("fork-b")
+            .scope();
+        warn!("from fork b");
+    }
+
+    let records = ctx.log_records();
+    let fork_b = records
+        .iter()
+        .find(|r| r.message == "from fork b")
+        .expect("fork-b record not found");
+
+    assert!(
+        fork_b.fields.iter().all(|(k, _)| k != "only_in_a"),
+        "fork-b should not have fork-a's field; got: {:?}",
+        fork_b.fields
+    );
+}
+
+/// Fields added inside a fork must not leak back to the parent.
+#[with_test_telemetry(test)]
+fn test_fork_fields_do_not_leak_to_parent(mut ctx: TestTelemetryContext) {
+    ctx.set_logging_settings(LoggingSettings::default());
+
+    {
+        let _scope = TelemetryContext::current()
+            .with_forked_log_named("child")
+            .scope();
+        add_fields!("child_only" => "yes");
+    }
+
+    warn!("from parent");
+
+    let records = ctx.log_records();
+    let parent_record = records
+        .iter()
+        .find(|r| r.message == "from parent")
+        .expect("parent record not found");
+
+    assert!(
+        parent_record.fields.iter().all(|(k, _)| k != "child_only"),
+        "parent should not have child's field; got: {:?}",
+        parent_record.fields
+    );
+}
+
+/// Nesting-level counter resets correctly across independent forks: nesting
+/// operations in one fork must not affect the parent's nesting counter.
+#[with_test_telemetry(test)]
+fn test_fork_nesting_is_independent_of_parent(_ctx: TestTelemetryContext) {
+    // Nest several times inside a fork.
+    {
+        let _scope = TelemetryContext::current()
+            .with_forked_log_named("nested-fork")
+            .scope();
+
+        for _ in 0..10 {
+            add_fields!("k" => "v");
+        }
+    }
+
+    // After the fork scope ends, nesting operations on the parent log should
+    // still work without hitting the limit prematurely.
+    add_fields!("parent_key" => "parent_value");
+}
+
+/// Deeply nested forks accumulate the correct lineage. This tests three
+/// levels of nesting (root -> conn -> req) which is the pattern used in the
+/// HTTP server example.
+#[with_test_telemetry(test)]
+fn test_three_level_fork_chain(mut ctx: TestTelemetryContext) {
+    ctx.set_logging_settings(LoggingSettings::default());
+
+    add_fields!("root_field" => "root_value");
+
+    let conn_ctx = TelemetryContext::current().with_forked_log_named("connection-log");
+    let _conn_scope = conn_ctx.scope();
+
+    add_fields!("conn_field" => "conn_value");
+
+    let req_ctx = TelemetryContext::current().with_forked_log_named("request-log");
+    let _req_scope = req_ctx.scope();
+
+    warn!("from request");
+
+    let records = ctx.log_records();
+    let req_record = records
+        .iter()
+        .find(|r| r.message == "from request")
+        .expect("request record not found");
+
+    // The request log should carry fields from all three levels.
+    assert!(
+        req_record
+            .fields
+            .iter()
+            .any(|(k, v)| k == "root_field" && v == "root_value"),
+        "request log missing root_field; got: {:?}",
+        req_record.fields
+    );
+    assert!(
+        req_record
+            .fields
+            .iter()
+            .any(|(k, v)| k == "conn_field" && v == "conn_value"),
+        "request log missing conn_field; got: {:?}",
+        req_record.fields
+    );
+}
+
 #[cfg(feature = "tracing-rs-compat")]
 mod tracing_rs_compat {
     use std::io;
     use std::sync::{Arc, Mutex};
 
-    use foundations::telemetry::TelemetryContext;
-    use foundations::telemetry::log::{TestLogRecord, warn};
+    use foundations::telemetry::log::{warn, TestLogRecord};
     use foundations::telemetry::settings::LoggingSettings;
+    use foundations::telemetry::TelemetryContext;
     use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
