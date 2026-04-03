@@ -255,8 +255,8 @@ fn trim_backtrace_to_caller(bt: &str) -> String {
 mod tests {
     #[cfg(not(feature = "panic_on_too_much_logger_nesting"))]
     use super::LoggerWithKvNestingTracking;
-    use crate::telemetry::log::{self, internal::current_log};
     use crate::telemetry::TelemetryContext;
+    use crate::telemetry::log::{self, internal::current_log};
     use foundations_macros::with_test_telemetry;
 
     // -------------------------------------------------------------------------

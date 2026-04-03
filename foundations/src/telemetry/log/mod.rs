@@ -67,6 +67,39 @@ pub fn verbosity() -> LogVerbosity {
     harness.settings.verbosity
 }
 
+/// Returns the current log's KV nesting level.
+///
+/// This counter is incremented each time [`add_fields!`] or [`set_verbosity`] is called
+/// on the current logger. It saturates at [`internal::LoggerWithKvNestingTracking::MAX_NESTING`].
+pub fn nesting_level() -> u32 {
+    current_log().read().nesting_level
+}
+
+/// Returns the name assigned to the current logger.
+///
+/// The root logger is named `"ROOT"`. Forked loggers take the name passed to
+/// [`TelemetryContext::with_forked_log_named`] (or `"forked"` when using
+/// [`TelemetryContext::with_forked_log`]).
+///
+/// [`TelemetryContext::with_forked_log`]: crate::telemetry::TelemetryContext::with_forked_log
+/// [`TelemetryContext::with_forked_log_named`]: crate::telemetry::TelemetryContext::with_forked_log_named
+pub fn log_name() -> String {
+    current_log().read().name.clone()
+}
+
+/// Returns the lineage of the current logger.
+///
+/// The lineage is the chain of logger names from the root down to the current logger,
+/// in creation order. It always starts with `"ROOT"` and grows by one entry for each
+/// [`TelemetryContext::with_forked_log`] or [`TelemetryContext::with_forked_log_named`]
+/// call in the ancestry.
+///
+/// [`TelemetryContext::with_forked_log`]: crate::telemetry::TelemetryContext::with_forked_log
+/// [`TelemetryContext::with_forked_log_named`]: crate::telemetry::TelemetryContext::with_forked_log_named
+pub fn log_lineage() -> Vec<String> {
+    current_log().read().lineage.clone()
+}
+
 /// Returns current log as a raw [slog] crate's `Logger` used by Foundations internally.
 ///
 /// Can be used to propagate the logging context to libraries that don't use Foundations'
